@@ -1,0 +1,149 @@
+---
+title: "Homework 6"
+author: "Puyuan Zhang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(broom)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(modelr)
+library(forcats)
+```
+
+## Problem 2
+```{r, warning = F}
+homi_data <- read.csv("data-homicides/homicide-data.csv")
+homi_data <- homi_data %>%
+  mutate(city_state = paste(city, state, sep = ", "),
+         victim_age = as.numeric(victim_age)
+         ) |>
+  filter(!(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")),
+         victim_race %in% c("White", "Black"),
+         !is.na(victim_age)) |>
+  mutate(solved = ifelse(disposition == "Closed by arrest", 1, 0))
+```
+```{r}
+data_bal <- homi_data |>
+  filter(city_state == "Baltimore, MD")
+bal_model <- glm(solved ~ victim_age + victim_sex + victim_race, data = data_bal, family = "binomial")
+bal_results <- tidy(bal_model, exponentiate = TRUE, conf.int = TRUE)
+male_female <- bal_results %>%
+  filter(term == "victim_sexMale") %>%
+  select(estimate, conf.low, conf.high)
+male_female
+```
+The adjusted odds ratio for solving homicides with male victims compared to female victims is `r male_female$estimate`. It is significantly less than 1, indicating that homicides involving male victims are less likely to be solved compared to those involving female victims.
+
+```{r, warning = F}
+city_results <- homi_data |>
+  mutate(victim_sex %in% c("Male", "Female")) |>
+  group_by(city_state) |>
+  nest() |>
+  mutate(model = map(data, ~ glm(solved ~ victim_sex, family = "binomial", data = .)),
+         tidy_model = map(model, ~ tidy(.x, exponentiate = TRUE, conf.int = TRUE))) |>
+  unnest(tidy_model) |>
+  filter(term == "victim_sexMale") |>
+  select(city_state, estimate, conf.low, conf.high)
+city_results
+```
+
+```{r}
+ggplot(city_results, aes(x = reorder(city_state, estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) +
+  coord_flip() +
+  labs(title = "Adjusted Odds Ratios for Solving Homicides (Male vs Female Victims)",
+       x = "City",
+       y = "Odds Ratio") +
+  theme_minimal()
+```
+
+The plot shows how likely it is for homicides involving male victims to be solved compared to female victims across different cities. In most cities, cases with male victims are less likely to be solved, with odds ratios below 1. Some cities, though, show little to no difference, or even slightly higher odds for solving male victim cases. The confidence intervals for some cities are wide, likely because of small sample sizes. 
+
+## Problem 3
+```{r}
+birthweight <- read.csv("birthweight.csv")
+birthweight <- birthweight %>%
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8), labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present"))
+  ) |>
+  drop_na()
+summary(birthweight)
+```
+
+```{r}
+model_1 <- lm(bwt ~ ., data = birthweight)
+summary(model_1)
+```
+
+I plan to use p-value to select the factor that may be significant to the prediction, which has p-value lower than 0.05. So, I select babysex, bhead, blength, delwt, gaweeks, parity, mrace, smoken to predict the weight of babies.
+
+```{r}
+model_2 <- lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + parity + mrace + smoken, data = birthweight)
+summary(model_2)
+
+birthweight <- birthweight |>
+  add_predictions(model_2, var = "predicted_bwt") |>
+  add_residuals(model_2, var = "residual_bwt")
+
+ggplot(birthweight, aes(x = predicted_bwt, y = residual_bwt)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals vs Fitted Values", x = "Predicted Birthweight", y = "Residuals")
+```
+
+The residuals vs. fitted values plot shows that residuals are generally centered around 0, indicating no major bias in predictions. However, there is some evidence of heteroscedasticity, with greater variability in residuals at higher predicted birthweights, and a few significant outliers. 
+
+```{r}
+model_3 <- lm(bwt ~ blength + gaweeks, data = birthweight)
+model_4 <- lm(bwt ~ bhead * blength * babysex, data = birthweight)
+```
+
+```{r}
+set.seed(1119)
+cv_df<- crossv_mc(birthweight, 10) |>
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+cv_df <- cv_df |>
+  mutate(
+    linear_mod = map(train, ~ lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + parity + mrace + smoken, data = .x)),
+    simple_mod = map(train, ~ lm(bwt ~ blength + gaweeks, data = .x)),
+    interaction_mod = map(train, ~ lm(bwt ~ bhead * blength * babysex, data = .x))
+  )
+
+cv_df <- cv_df |>
+  mutate(
+    rmse_linear = map2_dbl(linear_mod, test, ~ rmse(model = .x, data = .y)),
+    rmse_simple = map2_dbl(simple_mod, test, ~ rmse(model = .x, data = .y)),
+    rmse_interaction = map2_dbl(interaction_mod, test, ~ rmse(model = .x, data = .y))
+  )
+```
+```{r}
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") |> 
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+The violin plot compares RMSE distributions for three models: linear, simple, and interaction. The linear model performs best, with the lowest average RMSE (around 270–290) and minimal variability, indicating consistent and accurate predictions. The simple model, with only blength and gweeks as predictors, has the highest RMSE (320–340), showing insufficient predictive power. The interaction model slightly improves over the simple model but adds complexity without outperforming the linear model. Overall, the linear model is the most reliable and accurate choice.
+
+
+
